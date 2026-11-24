@@ -2390,9 +2390,17 @@ impl Shadow {
         // refresh copies the whole range, as for memory nothing watches,
         // whatever the journal, guards or kernel say was written. If a
         // write the tracking misses left a copy stale, this shows it.
-        static FULL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let full = *FULL.get_or_init(|| std::env::var("VICTORY_FULL_REFRESH").as_deref() == Ok("1"));
-        if !full && self.watched.load(Ordering::Relaxed) != NOT_WATCHED {
+        // `VICTORY_FULL_REFRESH=check`: the tracked refresh as usual, then
+        // the range compared with title memory; a difference is a write the
+        // tracking missed (or one made since its asking), logged with the
+        // source that answered and put right ([`Shadow::check_missed`]).
+        static FULL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        let mode = *FULL.get_or_init(|| match std::env::var("VICTORY_FULL_REFRESH").as_deref() {
+            Ok("1") => 1,
+            Ok("check") => 2,
+            _ => 0,
+        });
+        if mode != 1 && self.watched.load(Ordering::Relaxed) != NOT_WATCHED {
             if let Some((now, written)) = crate::watch::writes(from, to, true) {
                 self.watched.store(1, Ordering::Relaxed);
                 let copied = self.copy_stale(from, to, now, &written);
@@ -2401,6 +2409,9 @@ impl Shadow {
                     use crate::copystat::{C, add};
                     add(C::Checked, (to - from) as u64);
                     add(C::Unchanged, (to - from).saturating_sub(copied) as u64);
+                }
+                if mode == 2 {
+                    self.check_missed(from, to);
                 }
                 return copied;
             }
@@ -2414,6 +2425,55 @@ impl Shadow {
         #[cfg(feature = "diagnostics")]
         crate::copystat::whole(from, to - from, started.elapsed().as_micros() as u64);
         to - from
+    }
+
+    /// `VICTORY_FULL_REFRESH=check` (diagnostics): after a tracked refresh
+    /// of `[from, to)`, title memory compared with the copy. Where they
+    /// differ, the tracking said nothing of a write (or the title wrote
+    /// since the asking: such a difference shows once, a missed write stays
+    /// at every refresh until the page is written again). Logged with the
+    /// source that answered (`crate::watch::LAST_SOURCE`), the copy's
+    /// first refreshes with a difference and then each power of two of
+    /// them, and the range copied whole, so the run draws as if the write
+    /// had been seen.
+    fn check_missed(&self, from: usize, to: usize) {
+        if self.card.is_some() || self.place.is_some() || to <= from {
+            return;
+        }
+        let n = to - from;
+        let mut title = vec![0u8; n];
+        if !crate::host::read_into(from as *const u8, &mut title) {
+            return;
+        }
+        // SAFETY: inside the mapping; the refresh holds the copy.
+        let copy = unsafe { std::slice::from_raw_parts(self.data.add(from - self.start as usize), n) };
+        if title == copy {
+            return;
+        }
+        let first = title.iter().zip(copy).position(|(a, b)| a != b).unwrap_or(0);
+        let differing = title.iter().zip(copy).filter(|(a, b)| a != b).count();
+        let source = crate::watch::LAST_SOURCE.with(std::cell::Cell::get);
+        static MISSES: Mutex<Option<std::collections::HashMap<u64, u64>>> = Mutex::new(None);
+        let times = {
+            let mut misses = MISSES.lock().unwrap_or_else(|e| e.into_inner());
+            let count = misses.get_or_insert_with(Default::default).entry(self.id).or_insert(0);
+            *count += 1;
+            *count
+        };
+        if times <= 3 || times.is_power_of_two() {
+            tracing::warn!(
+                copy = self.id,
+                ?source,
+                start = format_args!("{:#x}", self.start),
+                len = self.len,
+                range = format_args!("{from:#x}+{n:#x}"),
+                first = format_args!("{:#x}", from + first),
+                differing,
+                times,
+                "MISSED WRITE"
+            );
+        }
+        self.copy(from, to);
     }
 
     /// Copies the pages of `[from, to)` written after their last copy

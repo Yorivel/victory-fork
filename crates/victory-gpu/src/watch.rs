@@ -308,6 +308,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     let j = &mut *j;
     // Asked ahead with the submission's other ranges: the journal has it.
     if j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
+        LAST_SOURCE.set(Source::Journal);
         return Some((
             j.ahead_asked,
             j.written
@@ -342,8 +343,10 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
         let written = guard(first * PAGE, last * PAGE);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::GuardUs, guarding.elapsed().as_micros() as u64);
+        LAST_SOURCE.set(Source::Guards);
         written?
     } else {
+        LAST_SOURCE.set(Source::Kernel);
         Vec::new()
     };
     #[cfg(feature = "diagnostics")]
@@ -366,6 +369,25 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
             .map(|(&p, &w)| (p, w))
             .collect(),
     ))
+}
+
+/// Which of the three answers [`writes`] gave last on this thread
+/// (diagnostics: `VICTORY_FULL_REFRESH=check` names the source of a missed
+/// write).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// Not asked yet on this thread.
+    None,
+    /// The journal of a range asked ahead with the submission's others.
+    Journal,
+    /// The kernel's write watch.
+    Kernel,
+    /// Our guards on view memory.
+    Guards,
+}
+
+thread_local! {
+    pub(crate) static LAST_SOURCE: std::cell::Cell<Source> = const { std::cell::Cell::new(Source::None) };
 }
 
 /// Guarded blocks of view memory.
