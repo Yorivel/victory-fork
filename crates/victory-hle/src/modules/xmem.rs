@@ -298,6 +298,19 @@ pub extern "system" fn XMemAllocDefault(size: usize, attributes: u64) -> *mut c_
     if block.is_null() {
         return block.cast();
     }
+    // `VICTORY_XMEM_LOG=1`: the default allocator's blocks, with their attributes (the first
+    // 3,000), to see whether the title's GPU-read memory comes from the host heap.
+    if std::env::var_os("VICTORY_XMEM_LOG").is_some_and(|v| v == "1") {
+        static LOGGED: AtomicU64 = AtomicU64::new(0);
+        if LOGGED.fetch_add(1, Ordering::Relaxed) < 3000 {
+            tracing::info!(
+                at = format_args!("{:#x}", block as usize + layout.align()),
+                size,
+                attributes = format_args!("{attributes:#x}"),
+                "xmem default alloc"
+            );
+        }
+    }
     // SAFETY: the block holds the alignment (at least the header) and then
     // `size` bytes.
     unsafe {

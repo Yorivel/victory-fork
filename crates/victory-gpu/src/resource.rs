@@ -913,6 +913,83 @@ pub(crate) struct Memory {
     /// Set when the memory came from the title's allocator, with these
     /// allocation attributes (it goes back there).
     attributes: Option<u64>,
+    /// Placed below 128 GiB by [`low_memory`] (goes back with `VirtualFree`).
+    low: bool,
+}
+
+/// Memory a list hands the title for its own data (`allocate_upload`), kept until the list
+/// is done: a host block, or one placed below 128 GiB by [`low_memory`].
+pub(crate) enum UploadBlock {
+    Heap(#[allow(dead_code)] Vec<u8>),
+    Low(NonNull<u8>),
+}
+
+// SAFETY: a block of plain bytes owned by the list; no thread-bound state.
+unsafe impl Send for UploadBlock {}
+
+impl UploadBlock {
+    /// `len` zeroed bytes, below 128 GiB with `VICTORY_LOW_HEAP=1`, else from the host heap;
+    /// and where they start.
+    pub(crate) fn new(len: usize) -> (UploadBlock, *mut u8) {
+        match low_memory(len, 1 << 16) {
+            Some(at) => (UploadBlock::Low(at), at.as_ptr()),
+            None => {
+                let mut block = vec![0u8; len];
+                let at = block.as_mut_ptr();
+                (UploadBlock::Heap(block), at)
+            }
+        }
+    }
+}
+
+impl Drop for UploadBlock {
+    fn drop(&mut self) {
+        if let UploadBlock::Low(at) = self {
+            // SAFETY: a whole reservation of `low_memory`.
+            unsafe {
+                windows_sys::Win32::System::Memory::VirtualFree(at.as_ptr().cast(), 0, windows_sys::Win32::System::Memory::MEM_RELEASE)
+            };
+        }
+    }
+}
+
+/// `VICTORY_LOW_HEAP=1`: the title's memory given out of ours (a heap it made through the
+/// device, a descriptor heap) is placed between 68 and 120 GiB, as console memory lies low,
+/// instead of in the host's heap above 2^40. The title may use a pointer into it as a GPU
+/// address (one address space on the console); the 40-bit directory translated shaders
+/// follow pointers through covers only the first 128 GiB, and past it they read 0 and drop
+/// their stores (the ray-tracing builder's memory, fork #16). `None`: off, or no room.
+fn low_memory(size: usize, align: usize) -> Option<NonNull<u8>> {
+    use windows_sys::Win32::System::Memory::{
+        MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_RESERVE,
+        MemExtendedParameterAddressRequirements, PAGE_READWRITE, VirtualAlloc2,
+    };
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("VICTORY_LOW_HEAP").is_some_and(|v| v == "1")) {
+        return None;
+    }
+    let mut requirements = MEM_ADDRESS_REQUIREMENTS {
+        LowestStartingAddress: 0x11_0000_0000usize as *mut c_void,
+        HighestEndingAddress: (0x1E_0000_0000usize - 1) as *mut c_void,
+        Alignment: if align > 1 << 16 { align } else { 0 },
+    };
+    let mut parameter = MEM_EXTENDED_PARAMETER::default();
+    parameter.Anonymous1._bitfield = MemExtendedParameterAddressRequirements as u64;
+    parameter.Anonymous2.Pointer = (&raw mut requirements).cast();
+    // SAFETY: a reservation of our own; the parameter points at `requirements`, which
+    // outlives the call. Fresh pages read zero.
+    let at = unsafe {
+        VirtualAlloc2(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            std::ptr::null_mut(),
+            size,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE,
+            &mut parameter,
+            1,
+        )
+    };
+    NonNull::new(at.cast())
 }
 
 pub type AllocRoutine = extern "system" fn(usize, u64) -> *mut c_void;
@@ -976,6 +1053,7 @@ impl Memory {
             ptr,
             layout,
             attributes: Some(attributes),
+            low: false,
         })
     }
 
@@ -995,8 +1073,12 @@ impl Memory {
             .filter(|&(size, _)| size > 0)
             .and_then(|(size, align)| Layout::from_size_align(size, align).ok())
             .ok_or(E_INVALIDARG)?;
+        let low = low_memory(layout.size(), layout.align());
         // SAFETY: the size is non-zero.
-        let ptr = NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(E_OUTOFMEMORY)?;
+        let ptr = match low {
+            Some(ptr) => ptr,
+            None => NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(E_OUTOFMEMORY)?,
+        };
         // The big ones are named in the log: the memory line counts our own
         // allocations by size, and these are the title's memory given out
         // of ours (a heap it made through the device, a descriptor heap).
@@ -1007,12 +1089,18 @@ impl Memory {
             ptr,
             layout,
             attributes: None,
+            low: low.is_some(),
         })
     }
 }
 
 impl Drop for Memory {
     fn drop(&mut self) {
+        if self.low {
+            // SAFETY: a whole reservation of `low_memory`.
+            unsafe { windows_sys::Win32::System::Memory::VirtualFree(self.ptr.as_ptr().cast(), 0, windows_sys::Win32::System::Memory::MEM_RELEASE) };
+            return;
+        }
         match (self.attributes, ALLOCATOR.get()) {
             (Some(attributes), Some(&(_, free))) => free(self.ptr.as_ptr().cast(), attributes),
             // SAFETY: allocated in `new` with this layout.

@@ -23,6 +23,8 @@ pub mod kernel;
 #[cfg(windows)]
 pub mod lifecycle;
 #[cfg(windows)]
+pub mod lowheap;
+#[cfg(windows)]
 pub mod media;
 #[cfg(windows)]
 pub mod net;
@@ -66,6 +68,10 @@ pub(crate) fn all() -> Vec<HleModule> {
     all.push(lifecycle::module());
     #[cfg(windows)]
     all.push(net::module());
+    #[cfg(windows)]
+    all.push(lowheap::module());
+    #[cfg(windows)]
+    all.push(lowheap::module_virtual());
     #[cfg(windows)]
     all.push(xmem::module());
     #[cfg(windows)]

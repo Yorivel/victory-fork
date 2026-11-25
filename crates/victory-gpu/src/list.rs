@@ -114,7 +114,7 @@ struct List {
     /// Ours, after the console layout: memory handed out by
     /// [`allocate_upload`], kept until the list is reset; the host list the
     /// calls record into (decision 0007), and the draw state the title set.
-    uploads: std::sync::Mutex<Vec<Vec<u8>>>,
+    uploads: std::sync::Mutex<Vec<crate::resource::UploadBlock>>,
     #[cfg(windows)]
     host: Option<crate::host::HostList>,
     #[cfg(windows)]
@@ -187,7 +187,7 @@ pub(crate) fn host_list<'a>(this: This) -> Option<&'a crate::host::HostList> {
 #[cfg(windows)]
 pub(crate) struct Detached {
     host: crate::host::HostList,
-    _uploads: Vec<Vec<u8>>,
+    _uploads: Vec<crate::resource::UploadBlock>,
     _state: crate::draw::State,
 }
 
@@ -1417,8 +1417,9 @@ extern "system" fn allocate_upload(this: This, size: u64, alignment: u64) -> *mu
     if this.is_null() || !align.is_power_of_two() {
         return std::ptr::null_mut();
     }
-    let mut block = vec![0u8; len];
-    let start = block.as_mut_ptr();
+    // Below 128 GiB with `VICTORY_LOW_HEAP=1`: the builder's programs reach these
+    // descriptions through the 40-bit directory too, which covers only the first 128 GiB.
+    let (block, start) = crate::resource::UploadBlock::new(len);
     // SAFETY: the offset is below `align`, so `size` bytes fit after it.
     let at = unsafe { start.add(start.align_offset(align)) };
     // SAFETY: the title passes one of our lists.

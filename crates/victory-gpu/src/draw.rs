@@ -1767,6 +1767,46 @@ impl State {
             if LOGGED.fetch_add(1, Ordering::Relaxed) < 20_000 {
                 tracing::info!(pipeline = format_args!("{:#x}", self.pipeline as usize), "bvh dispatch{}", self.roots_text([x, y, z]));
             }
+            // Root views above the 40-bit directory's 128 GiB: the host allocation that holds
+            // them, once per allocation (`VirtualQuery`).
+            static SEEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<usize>>> =
+                std::sync::LazyLock::new(Default::default);
+            for root in self.compute.iter() {
+                let Root::View(a) = root else { continue };
+                if *a < 1 << 37 {
+                    continue;
+                }
+                #[repr(C)]
+                #[derive(Default)]
+                struct Mbi {
+                    base: usize,
+                    allocation: usize,
+                    allocation_protect: u32,
+                    partition: u16,
+                    size: usize,
+                    state: u32,
+                    protect: u32,
+                    kind: u32,
+                }
+                #[link(name = "kernel32")]
+                unsafe extern "system" {
+                    fn VirtualQuery(at: *const std::ffi::c_void, out: *mut Mbi, len: usize) -> usize;
+                }
+                let mut info = Mbi::default();
+                // SAFETY: a query of our own process.
+                let n = unsafe { VirtualQuery(*a as *const std::ffi::c_void, &mut info, size_of::<Mbi>()) };
+                let base = info.allocation;
+                if n != 0 && SEEN.lock().unwrap_or_else(|e| e.into_inner()).insert(base) {
+                    tracing::info!(
+                        view = format_args!("{a:#x}"),
+                        allocation = format_args!("{base:#x}"),
+                        region = format_args!("{:#x}+{:#x}", info.base, info.size),
+                        kind = format_args!("{:#x}", info.kind),
+                        protect = format_args!("{:#x}", info.allocation_protect),
+                        "bvh root view above 128 GiB: its host allocation"
+                    );
+                }
+            }
         }
         // The ray-tracing structure builder's stages run all or none.
         if crate::pipeline::is_builder(self.pipeline as This) && !crate::pipeline::builder_runs() {
