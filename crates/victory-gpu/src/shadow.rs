@@ -1953,6 +1953,7 @@ impl Shadow {
                 }
                 if differs != 0 {
                     crate::watch::writing(start + at, n);
+                    crate::host::write_path("copy_back");
                     crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
                     written += n;
                 }
@@ -2042,6 +2043,7 @@ impl Shadow {
             return 0;
         }
         crate::watch::writing(start + at, n);
+        crate::host::write_path("relay_merge");
         crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
         n
     }
@@ -2570,6 +2572,7 @@ impl Shadow {
             }
             if differs != 0 {
                 crate::watch::writing(start + at, n);
+                crate::host::write_path("card_merge");
                 crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
                 written = n;
             }
@@ -2645,6 +2648,7 @@ impl Shadow {
             return 0;
         }
         crate::watch::writing(start + at, n);
+        crate::host::write_path("card_merge_relay");
         crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
         n
     }

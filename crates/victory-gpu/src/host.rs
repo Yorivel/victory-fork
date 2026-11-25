@@ -5341,6 +5341,35 @@ impl Batch {
     }
 }
 
+thread_local! {
+    /// Which merge makes the next `write_mapped` ([`writeback_log`]).
+    static WRITE_PATH: std::cell::Cell<&'static str> = const { std::cell::Cell::new("write") };
+}
+
+/// Names the merge whose `write_mapped` follows, for `VICTORY_WRITEBACK_LOG`.
+pub(crate) fn write_path(path: &'static str) {
+    WRITE_PATH.with(|p| p.set(path));
+}
+
+/// `VICTORY_WRITEBACK_LOG=<file>`: every write of ours into title memory (`write_mapped`,
+/// `copy_mapped` to the title), one line each ("<address> <len> <merge> <first 64 bytes>"),
+/// written at once: what the GPU side put where, to set against a crash's objects by
+/// physical page.
+fn writeback_log(at: usize, len: usize, src: *const u8, path: &str) {
+    use std::io::Write;
+    static FILE: std::sync::LazyLock<Option<Mutex<std::fs::File>>> = std::sync::LazyLock::new(|| {
+        let path = std::env::var_os("VICTORY_WRITEBACK_LOG")?;
+        std::fs::File::create(path).ok().map(Mutex::new)
+    });
+    if let Some(file) = FILE.as_ref() {
+        // SAFETY: the caller's source holds `len` bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(src, len.min(64)) };
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let line = format!("{at:#x} {len:#x} {path} {hex}\n");
+        let _ = file.lock().unwrap_or_else(|e| e.into_inner()).write_all(line.as_bytes());
+    }
+}
+
 /// Copies title memory at submission. The ranges were checked against their
 /// resources when recorded, but the title may since have unmapped pages of
 /// them (tiled memory, page mappings), which read as zeros here; a title
@@ -5351,6 +5380,9 @@ impl Batch {
 /// cost about 2 ms per copy in the title's big pools (it walks the page
 /// tables to the region's end), which made copies run at 100-200 MB/s.
 pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: bool) {
+    if title_dst {
+        writeback_log(dst as usize, len, src, "copy");
+    }
     #[cfg(feature = "diagnostics")]
     match crate::copystat::mode() {
         1 => {
@@ -5505,6 +5537,7 @@ fn direct_writes() -> bool {
 /// Copies host memory into title memory after a submission (what shaders
 /// wrote), leaving pages that are not mapped alone.
 pub(crate) fn write_mapped(dst: *mut u8, src: *const u8, len: usize) {
+    writeback_log(dst as usize, len, src, WRITE_PATH.with(|p| p.replace("write")));
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     let direct = direct_writes();
