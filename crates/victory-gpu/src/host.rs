@@ -5352,21 +5352,26 @@ pub(crate) fn write_path(path: &'static str) {
 }
 
 /// `VICTORY_WRITEBACK_LOG=<file>`: every write of ours into title memory (`write_mapped`,
-/// `copy_mapped` to the title), one line each ("<address> <len> <merge> <first 64 bytes>"),
-/// written at once: what the GPU side put where, to set against a crash's objects by
-/// physical page.
+/// `copy_mapped` to the title), one line each ("<address> <len> <merge> <first 64 bytes>
+/// <offset in the .bin>"), written at once, and beside it (`<file>.bin`) every write's bytes
+/// whole: what the GPU side put where, to set against a crash's objects by physical page.
 fn writeback_log(at: usize, len: usize, src: *const u8, path: &str) {
     use std::io::Write;
-    static FILE: std::sync::LazyLock<Option<Mutex<std::fs::File>>> = std::sync::LazyLock::new(|| {
+    static FILES: std::sync::LazyLock<Option<Mutex<(std::fs::File, std::fs::File, u64)>>> = std::sync::LazyLock::new(|| {
         let path = std::env::var_os("VICTORY_WRITEBACK_LOG")?;
-        std::fs::File::create(path).ok().map(Mutex::new)
+        let mut bin = path.clone();
+        bin.push(".bin");
+        Some(Mutex::new((std::fs::File::create(path).ok()?, std::fs::File::create(bin).ok()?, 0)))
     });
-    if let Some(file) = FILE.as_ref() {
+    if let Some(files) = FILES.as_ref() {
         // SAFETY: the caller's source holds `len` bytes.
-        let bytes = unsafe { std::slice::from_raw_parts(src, len.min(64)) };
-        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        let line = format!("{at:#x} {len:#x} {path} {hex}\n");
-        let _ = file.lock().unwrap_or_else(|e| e.into_inner()).write_all(line.as_bytes());
+        let bytes = unsafe { std::slice::from_raw_parts(src, len) };
+        let hex: String = bytes[..len.min(64)].iter().map(|b| format!("{b:02x}")).collect();
+        let mut f = files.lock().unwrap_or_else(|e| e.into_inner());
+        let line = format!("{at:#x} {len:#x} {path} {hex} {:#x}\n", f.2);
+        let _ = f.1.write_all(bytes);
+        f.2 += len as u64;
+        let _ = f.0.write_all(line.as_bytes());
     }
 }
 

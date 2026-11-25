@@ -1794,6 +1794,7 @@ impl State {
                 let callers: Vec<String> = frames[..n].iter().map(|f| format!("{:x}", *f as usize)).collect();
                 tracing::info!(
                     pipeline = format_args!("{:#x}", self.pipeline as usize),
+                    limit = self.thread_limit.map_or_else(|| "-".to_owned(), |l| l.to_string()),
                     callers = callers.join(","),
                     "bvh dispatch{}",
                     self.roots_text([x, y, z])
