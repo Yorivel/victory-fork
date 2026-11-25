@@ -146,6 +146,13 @@ fn windows() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_INDIRECT_WINDOW").is_some_and(|v| v == "1"))
 }
 
+/// `VICTORY_BVH_ADDR_LOG=1` ([`Draw::dispatch`]).
+#[cfg(feature = "diagnostics")]
+fn bvh_addr_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_ADDR_LOG").is_some_and(|v| v == "1"))
+}
+
 /// What one title list has set, and what its host list was last given.
 #[derive(Default)]
 pub(crate) struct State {
@@ -1708,7 +1715,13 @@ impl State {
     /// ray-tracing structure builder passes its buffers this way).
     #[cfg(feature = "diagnostics")]
     fn list_dropped_roots(&self, groups: [u32; 3]) {
-        crate::capture::op(0, || {
+        crate::capture::op(0, || self.roots_text(groups));
+    }
+
+    /// The compute root arguments, as [`Self::list_dropped_roots`] lists them.
+    #[cfg(feature = "diagnostics")]
+    fn roots_text(&self, groups: [u32; 3]) -> String {
+        {
             use std::fmt::Write;
             let [x, y, z] = groups;
             let mut text = format!("  its roots ({x}x{y}x{z}):");
@@ -1733,7 +1746,7 @@ impl State {
                 }
             }
             text
-        });
+        }
     }
 
     /// Runs a dispatch on the host.
@@ -1745,6 +1758,15 @@ impl State {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             crate::pipeline::note_drop(self.pipeline as This);
             return;
+        }
+        // `VICTORY_BVH_ADDR_LOG=1`: each builder dispatch that runs, with its roots (root
+        // views and the address pairs in its constants), the first 20,000 of them.
+        #[cfg(feature = "diagnostics")]
+        if crate::pipeline::is_builder(self.pipeline as This) && bvh_addr_log() && crate::pipeline::builder_runs() {
+            static LOGGED: AtomicU64 = AtomicU64::new(0);
+            if LOGGED.fetch_add(1, Ordering::Relaxed) < 20_000 {
+                tracing::info!(pipeline = format_args!("{:#x}", self.pipeline as usize), "bvh dispatch{}", self.roots_text([x, y, z]));
+            }
         }
         // The ray-tracing structure builder's stages run all or none.
         if crate::pipeline::is_builder(self.pipeline as This) && !crate::pipeline::builder_runs() {

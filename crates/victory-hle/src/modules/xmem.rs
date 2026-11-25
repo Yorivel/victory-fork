@@ -811,9 +811,60 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     victory_gpu::title_memory_remapped(base, len);
     // What the range shows now, for the GPU side's in-place census.
     victory_gpu::title_memory_view(base, len, slice.section.0 as usize, (slice.index * PAGE) as u64);
+    log_aliases(physical, base, len, &slice);
+    view_event(|| format!("map {base:#x} {len:#x} {:#x} {:#x}", Arc::as_ptr(&slice.section) as usize, slice.index));
     physical.views.insert(base, (len, slice));
     VIEWS_CHANGED.fetch_add(1, Ordering::Relaxed);
     true
+}
+
+/// `VICTORY_VIEW_LOG=<file>`: every view mapped ("map <base> <len> <section> <first page>")
+/// and unmapped ("unmap <base>"), one line each, written at once (a crash keeps every line
+/// before it): the views at any moment, aliases included, can be rebuilt from it afterwards.
+fn view_event(line: impl FnOnce() -> String) {
+    use std::io::Write;
+    static FILE: LazyLock<Option<Mutex<std::fs::File>>> = LazyLock::new(|| {
+        let path = std::env::var_os("VICTORY_VIEW_LOG")?;
+        std::fs::File::create(path).ok().map(Mutex::new)
+    });
+    if let Some(file) = FILE.as_ref() {
+        let mut text = line();
+        text.push('\n');
+        let _ = file.lock().unwrap_or_else(|e| e.into_inner()).write_all(text.as_bytes());
+    }
+}
+
+/// `VICTORY_ALIAS_LOG=1`: a view mapped at `base` that shows section pages another view
+/// already shows at a different address is logged with both address ranges (the first 400;
+/// then every 1000th), so a crash's addresses can be matched against memory the title reaches
+/// through two addresses.
+fn log_aliases(physical: &Physical, base: usize, len: usize, slice: &Slice) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static SEEN: AtomicU64 = AtomicU64::new(0);
+    if !*ON.get_or_init(|| std::env::var_os("VICTORY_ALIAS_LOG").is_some_and(|v| v == "1")) {
+        return;
+    }
+    let (first, last) = (slice.index, slice.index + len.div_ceil(PAGE));
+    for (&at, (n, other)) in &physical.views {
+        if at == base || !Arc::ptr_eq(&other.section, &slice.section) {
+            continue;
+        }
+        let (o_first, o_last) = (other.index, other.index + n.div_ceil(PAGE));
+        let (lo, hi) = (first.max(o_first), last.min(o_last));
+        if lo >= hi {
+            continue;
+        }
+        let k = SEEN.fetch_add(1, Ordering::Relaxed);
+        if k < 400 || k % 1000 == 0 {
+            tracing::info!(
+                new = format_args!("{:#x}..{:#x}", base + (lo - first) * PAGE, base + (hi - first) * PAGE),
+                old = format_args!("{:#x}..{:#x}", at + (lo - o_first) * PAGE, at + (hi - o_first) * PAGE),
+                pages = hi - lo,
+                count = k + 1,
+                "physical pages shown at two addresses (alias)"
+            );
+        }
+    }
 }
 
 /// Commits the section pages a view shows (once per page, whichever view).
@@ -887,6 +938,7 @@ fn unmap(physical: &mut Physical, base: usize, len: usize) {
         .chain(physical.views.range(base + 1..end).map(|(at, _)| *at))
         .collect();
     for at in hit {
+        view_event(|| format!("unmap {at:#x}"));
         let Some((size, slice)) = physical.views.remove(&at) else {
             continue;
         };
