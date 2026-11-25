@@ -288,7 +288,41 @@ pub fn title_memory_section(section: usize, bytes: u64, committed: bool) {
 /// The runtime mapped `[at, at + len)` as a view of `section` from
 /// `offset` on. Call after [`crate::title_memory_remapped`] of the range.
 pub fn title_memory_view(at: usize, len: usize, section: usize, offset: u64) {
-    views().views.insert(at, (len, section, offset));
+    let old = views().views.insert(at, (len, section, offset));
+    if let Some((n, sec, off)) = old {
+        count_shown(sec, off, n, -1);
+    }
+    count_shown(section, offset, len, 1);
+}
+
+/// Per 64 KiB page of a section (handle, page number in it): how many views show it.
+static SHOWN: std::sync::LazyLock<Mutex<std::collections::HashMap<(usize, u64), i32>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+fn count_shown(section: usize, offset: u64, len: usize, by: i32) {
+    let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
+    let (first, last) = (offset >> 16, (offset + len as u64).div_ceil(1 << 16));
+    for page in first..last {
+        let n = shown.entry((section, page)).or_insert(0);
+        *n += by;
+        if *n <= 0 {
+            shown.remove(&(section, page));
+        }
+    }
+}
+
+/// Whether the physical page title address `at` shows is shown at another address too
+/// (a write through either address changes both).
+pub(crate) fn aliased(at: usize) -> bool {
+    let place = {
+        let v = views();
+        v.views
+            .range(..=at)
+            .next_back()
+            .filter(|(base, view)| *base + view.0 > at)
+            .map(|(base, view)| (view.1, (view.2 + (at - base) as u64) >> 16))
+    };
+    place.is_some_and(|p| SHOWN.lock().unwrap_or_else(|e| e.into_inner()).get(&p).is_some_and(|&n| n > 1))
 }
 
 /// What `[at, at + len)` showed is gone ([`crate::title_memory_remapped`]):
@@ -303,7 +337,9 @@ pub(crate) fn views_gone(at: usize, len: usize) {
     let first = v.views.range(..=at).next_back().filter(|(base, view)| *base + view.0 > at).map(|(base, _)| *base);
     let gone: Vec<usize> = first.into_iter().chain(v.views.range(at.saturating_add(1)..end).map(|(base, _)| *base)).collect();
     for base in gone {
-        v.views.remove(&base);
+        if let Some((n, sec, off)) = v.views.remove(&base) {
+            count_shown(sec, off, n, -1);
+        }
     }
 }
 

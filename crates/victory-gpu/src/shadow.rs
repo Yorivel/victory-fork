@@ -2431,7 +2431,7 @@ impl Shadow {
                 _ => 0,
             };
             let at = &mut copied[page - base];
-            if *at == 0 || write > *at {
+            if *at == 0 || write > *at || alias_refresh() && crate::inplace::aliased(page * PAGE) {
                 // A page only partly in the range is copied in part: it
                 // stays stale for the rest.
                 let (start, end) = (self.start as usize, (self.start + self.len) as usize);
@@ -2730,6 +2730,15 @@ pub(crate) fn spans() -> Vec<(u64, u64, bool)> {
     let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
     spans.extend(loose.keys().map(|&(start, len)| (start, len, true)));
     spans
+}
+
+/// `VICTORY_ALIAS_REFRESH=1`: a page the title also shows at another address is copied at
+/// every refresh, written or not. The write tracking is by address, so a write through the
+/// other address never marks it, and its copy stays stale (the ray-tracing builder's memory
+/// is reached through both of two addresses `0x6_0000_0000` apart, fork #16).
+fn alias_refresh() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_ALIAS_REFRESH").is_some_and(|v| v == "1"))
 }
 
 /// The copy of the innermost title buffer holding `[address, address +
