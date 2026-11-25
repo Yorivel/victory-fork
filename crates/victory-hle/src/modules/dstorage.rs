@@ -1005,7 +1005,14 @@ fn into_destination(
     // Consecutive pages of one allocation (the usual case): written in
     // place through one view.
     if let Some(mut window) = super::xmem::page_window(pages, offset, len) {
-        return fill(window.bytes()).map(drop);
+        let filled = fill(window.bytes());
+        drop(window);
+        // Written around the title's mapping: tell the GPU side where the
+        // title sees these bytes (`wrote_physical`).
+        if let Ok(n) = filled {
+            super::xmem::wrote_physical(pages, offset, n);
+        }
+        return filled.map(drop);
     }
     let mut data = vec![0; len];
     let n = fill(&mut data)?;
@@ -1028,6 +1035,7 @@ fn into_destination(
         if tries > 0 {
             tracing::info!(offset, len, tries, "dstorage: a destination's physical pages written after a retry");
         }
+        super::xmem::wrote_physical(pages, offset, n);
         Ok(())
     } else {
         let known = super::xmem::pages_known(pages, offset, len);
