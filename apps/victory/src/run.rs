@@ -138,6 +138,10 @@ fn diagnostics(image: &victory_loader::LoadedImage, cfg: &victory_core::Config) 
     victory_loader::dump_stacks_on_schedule();
     victory_hle::modules::audio::capture::start();
     watch(image.base(), image.info().size_of_image as usize);
+    // `VICTORY_BVH_CALLS=1`: the title's calls into the ray-tracing builder, logged. The import
+    // slots are this dump's (game_scarlett_master.exe): prebuild info, build batched,
+    // rehydrate batched, copy.
+    victory_hle::bvhcalls::install(image.base(), &[(0x6793f98, 0), (0x6793f88, 1), (0x6793fa0, 2), (0x6793f90, 3)]);
     // Debugging aid: `VICTORY_CRASH_SAVE=<rva>:<len>,...` (hex) writes those
     // title ranges to `crash-<rva>.bin` in the cache dir on a crash.
     let size = image.info().size_of_image as usize;
