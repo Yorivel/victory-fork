@@ -536,6 +536,45 @@ fn runs(pages: &[usize], offset: usize, len: usize) -> Option<Vec<(Slice, usize)
     Some(runs)
 }
 
+/// After a write to physical pages through a view of their own
+/// ([`write_physical`], [`page_window`]): the title addresses those bytes
+/// are mapped at, each told to the GPU side as written
+/// (`victory_gpu::kernel_will_write`). Such a write goes around the title's
+/// mapping, so neither the guards on it (view memory) nor the kernel's
+/// write watch see it, and a host copy taken from that mapping before
+/// kept the old bytes for the rest of the run: the first gameplay room's
+/// walls, streamed in at the hand-over, drawn in about one run in four.
+/// `VICTORY_DSTORAGE_NOTIFY=1` turns it on (experiment).
+pub(crate) fn wrote_physical(pages: &[usize], offset: usize, len: usize) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("VICTORY_DSTORAGE_NOTIFY").as_deref() == Ok("1")) || len == 0 {
+        return;
+    }
+    let ranges: Vec<(usize, usize)> = {
+        let p = physical();
+        let end = offset + len;
+        let mut out = Vec::new();
+        for (k, &page) in pages.iter().enumerate().take(end.div_ceil(PAGE)).skip(offset / PAGE) {
+            let Some(slice) = p.pages.get(&page) else { continue };
+            // The bytes of this page the write covered.
+            let lo = offset.max(k * PAGE) - k * PAGE;
+            let hi = end.min((k + 1) * PAGE) - k * PAGE;
+            for (&at, (view_len, start)) in &p.views {
+                if Arc::ptr_eq(&start.section, &slice.section)
+                    && slice.index >= start.index
+                    && slice.index < start.index + view_len / PAGE
+                {
+                    out.push((at + (slice.index - start.index) * PAGE + lo, hi - lo));
+                }
+            }
+        }
+        out
+    };
+    for (at, n) in ranges {
+        victory_gpu::kernel_will_write(at, n);
+    }
+}
+
 /// Copies `data` into physical pages, from `offset` bytes into the first,
 /// whether or not they are mapped anywhere (DirectStorage destinations).
 /// One view per run of consecutive pages, not one per page: each view
