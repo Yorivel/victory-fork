@@ -88,14 +88,24 @@ extern "system" fn build(this: *mut c_void, list: *mut c_void, count: u32, descs
 
 type Rehydrate = extern "system" fn(*mut c_void, *mut c_void, u32, *const BuildDesc, *const u64) -> i32;
 extern "system" fn rehydrate(this: *mut c_void, list: *mut c_void, count: u32, descs: *const BuildDesc, sizes: *const u64) -> i32 {
+    // The serialized header of each structure, as the library is about to read it (through
+    // the CPU address the fifth argument holds): what it sizes the rehydration by.
+    let log = logged();
+    let headers: Vec<String> = if log && !sizes.is_null() {
+        // SAFETY: the title passes `count` CPU addresses of the structures.
+        (0..count as usize).map(|k| hex(unsafe { *sizes.add(k) } as *const u8, 0x100)).collect()
+    } else {
+        Vec::new()
+    };
     // SAFETY: the library's own routine of this type.
     let f: Rehydrate = unsafe { std::mem::transmute(ORIGINAL[2].load(Ordering::Relaxed)) };
     let result = f(this, list, count, descs, sizes);
-    if logged() {
-        for k in 0..count.min(8) as usize {
+    if log {
+        for k in 0..count as usize {
             // SAFETY: the title passes `count` descriptions (and sizes, if not null).
             let (d, size) = unsafe { (&*descs.add(k), if sizes.is_null() { 0 } else { *sizes.add(k) }) };
             tracing::info!(
+                header = headers.get(k).map_or("", String::as_str),
                 count,
                 index = k,
                 result = format_args!("{result:#x}"),
