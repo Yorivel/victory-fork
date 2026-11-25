@@ -54,6 +54,8 @@ fn build() -> &'static [u8; 32] {
         match exe {
             Ok(mut bytes) => {
                 bytes.extend_from_slice(&limit.to_le_bytes());
+                // Programs translated with the thread limit guard differ (`VICTORY_THREAD_DIMS`).
+                bytes.push(u8::from(victory_shader::emit::thread_dims()));
                 // So is the view heap's null slot (it differs by host GPU):
                 // a translation cached without the clamp must not be served.
                 crate::descriptor::host::probe_view_limit();

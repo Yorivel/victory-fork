@@ -2389,6 +2389,21 @@ impl<'a> Lower<'a> {
             self.mesh_prologue(mesh).map_err(|w| unsupported(0, w))?;
             self.block[order[0]] = Some(self.cur);
         }
+        // `VICTORY_THREAD_DIMS=1`: lanes at or past the dispatch's thread count leave at once
+        // (`shader.rs` `USER_THREAD_LIMIT`), as on the console, where a dispatch given in
+        // threads runs no lanes past it.
+        if self.x.native.stage == HwStage::Cs && super::shader::thread_dims() && !self.counters.contains_key(&order[0]) {
+            let limit = self.host_word(RootType::Other(super::shader::USER_THREAD_LIMIT), 0, 0);
+            let i32t = self.s.t.i32;
+            let zero = self.s.m.i32(0);
+            let tid = self.s.op(self.cur, "threadId.i32", Attr::ReadNone, i32t, 93, &[zero]);
+            let inside = self.s.m.cmp(self.cur, pred::IULT, tid, limit);
+            let body = self.s.m.new_block();
+            let abort = self.abort_block();
+            self.s.m.terminate(self.cur, Term::CondBr(inside, body, abort));
+            self.cur = body;
+            self.block[order[0]] = Some(body);
+        }
         for &b in &order {
             self.cur = self.block[b].expect("reachable");
             self.cur_ir = b;

@@ -157,6 +157,9 @@ fn bvh_addr_log() -> bool {
 #[derive(Default)]
 pub(crate) struct State {
     pipeline: usize,
+    /// The thread count in x of the dispatch being run when given in threads
+    /// (`USER_THREAD_LIMIT`); `None`: no limit.
+    thread_limit: Option<u32>,
     /// View heap, sampler heap.
     heaps: [usize; 2],
     graphics: Vec<Root>,
@@ -701,7 +704,10 @@ impl State {
         dword: u32,
         memory: Option<&crate::memory::Ready>,
     ) -> u32 {
-        use victory_shader::emit::{USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS};
+        use victory_shader::emit::{USER_MEMORY_BASE, USER_THREAD_LIMIT, USER_VIEW_ADDRESS, USER_VIEW_BIAS};
+        if kind == USER_THREAD_LIMIT {
+            return self.thread_limit.unwrap_or(u32::MAX);
+        }
         if kind == USER_MEMORY_BASE {
             return memory.map_or(0, |m| m.base);
         }
@@ -1749,6 +1755,17 @@ impl State {
         }
     }
 
+    /// The thread count in x of the dispatch being run, for a dispatch given in threads
+    /// (`USER_THREAD_LIMIT`); all ones otherwise.
+    pub(crate) fn set_thread_limit(&mut self, limit: Option<u32>) {
+        self.thread_limit = limit;
+    }
+
+    /// The title pipeline bound now.
+    pub(crate) fn pipeline_handle(&self) -> This {
+        self.pipeline as This
+    }
+
     /// Runs a dispatch on the host.
     pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
         // It may write the arguments a window holds clamped.
@@ -1765,7 +1782,22 @@ impl State {
         if crate::pipeline::is_builder(self.pipeline as This) && bvh_addr_log() && crate::pipeline::builder_runs() {
             static LOGGED: AtomicU64 = AtomicU64::new(0);
             if LOGGED.fetch_add(1, Ordering::Relaxed) < 20_000 {
-                tracing::info!(pipeline = format_args!("{:#x}", self.pipeline as usize), "bvh dispatch{}", self.roots_text([x, y, z]));
+                // The return addresses up the stack: which call site of the builder library
+                // issued the dispatch (the title's code calls the list's method).
+                #[link(name = "kernel32")]
+                unsafe extern "system" {
+                    fn RtlCaptureStackBackTrace(skip: u32, count: u32, frames: *mut *mut std::ffi::c_void, hash: *mut u32) -> u16;
+                }
+                let mut frames = [std::ptr::null_mut(); 12];
+                // SAFETY: room for 12 frames.
+                let n = unsafe { RtlCaptureStackBackTrace(0, 12, frames.as_mut_ptr(), std::ptr::null_mut()) } as usize;
+                let callers: Vec<String> = frames[..n].iter().map(|f| format!("{:x}", *f as usize)).collect();
+                tracing::info!(
+                    pipeline = format_args!("{:#x}", self.pipeline as usize),
+                    callers = callers.join(","),
+                    "bvh dispatch{}",
+                    self.roots_text([x, y, z])
+                );
             }
             // Root views above the 40-bit directory's 128 GiB: the host allocation that holds
             // them, once per allocation (`VirtualQuery`).

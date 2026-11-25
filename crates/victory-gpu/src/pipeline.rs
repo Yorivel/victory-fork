@@ -263,6 +263,30 @@ pub(crate) fn builder_quarantined(this: This) -> bool {
     is_builder(this) && *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1"))
 }
 
+/// The thread-group size of the compute pipeline `this` (its translated program's), for a
+/// dispatch given in threads (`DispatchX` with `USE_THREAD_DIMENSIONS`).
+#[cfg(windows)]
+pub(crate) fn compute_threads(this: This) -> Option<[u32; 3]> {
+    if this.is_null() {
+        return None;
+    }
+    static KNOWN: std::sync::LazyLock<Mutex<HashMap<usize, Option<[u32; 3]>>>> = std::sync::LazyLock::new(Default::default);
+    if let Some(&known) = KNOWN.lock().unwrap_or_else(|e| e.into_inner()).get(&(this as usize)) {
+        return known;
+    }
+    use victory_shader::{Container, FourCC};
+    let threads = pipeline(this).shaders.iter().find(|s| s.stage == "compute").and_then(|shader| {
+        let c = Container::parse(&shader.container).ok()?;
+        let programs = victory_shader::native_programs(c.part(FourCC::DXIL)?.data).ok()?;
+        programs.iter().find_map(|p| match &p.io {
+            victory_shader::native::StageIo::Cs(cs) => Some(cs.threads),
+            _ => None,
+        })
+    });
+    KNOWN.lock().unwrap_or_else(|e| e.into_inner()).insert(this as usize, threads);
+    threads
+}
+
 /// Whether the title's pipeline `this` is one of the structure builder's.
 #[cfg(windows)]
 pub(crate) fn is_builder(this: This) -> bool {

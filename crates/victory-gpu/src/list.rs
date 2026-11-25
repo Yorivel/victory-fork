@@ -1315,12 +1315,24 @@ extern "system" fn driver_hint(_: This, _feature: u64, _value: u64) -> u64 {
 
 /// `DispatchX(x, y, z, flags)`: a dispatch with console flags, which the
 /// host has no use for (the ray-tracing builder dispatches this way).
-extern "system" fn dispatch_x(this: This, x: u32, y: u32, z: u32, _flags: u32) {
+extern "system" fn dispatch_x(this: This, x: u32, y: u32, z: u32, flags: u32) {
     #[cfg(windows)]
-    state::dispatch(this, x, y, z);
+    {
+        // `VICTORY_THREAD_DIMS=1`: flag 0x20 is the dispatch initiator's USE_THREAD_DIMENSIONS,
+        // x, y and z then count threads, not groups (the ray-tracing builder's in-place
+        // rehydration, `caa78b8ca62bc3d6`: taken as groups, its lanes wrote up to 64 times
+        // its node area, over the next structures; fork #16). The groups that hold them run.
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let on = *ON.get_or_init(|| std::env::var_os("VICTORY_THREAD_DIMS").is_some_and(|v| v == "1"));
+        if on && flags & 0x20 != 0 {
+            state::dispatch_threads(this, x, y, z);
+            return;
+        }
+        state::dispatch(this, x, y, z);
+    }
     #[cfg(not(windows))]
     {
-        let _ = (this, x, y, z);
+        let _ = (this, x, y, z, flags);
         count_dispatch();
     }
 }
@@ -1589,6 +1601,19 @@ mod state {
     pub(super) extern "system" fn dispatch(this: This, x: u32, y: u32, z: u32) {
         super::count_dispatch();
         with_state(this, |list, s| s.dispatch(list, x, y, z));
+    }
+    /// A dispatch given in threads: the groups that hold them, by the bound pipeline's group
+    /// size (as groups when it is not known).
+    pub(super) fn dispatch_threads(this: This, x: u32, y: u32, z: u32) {
+        super::count_dispatch();
+        with_state(this, |list, s| {
+            let [tx, ty, tz] = crate::pipeline::compute_threads(s.pipeline_handle()).unwrap_or([1, 1, 1]);
+            // The lanes past `x` leave at once (`USER_THREAD_LIMIT`), as on the console.
+            // shortcut: in y and z only whole groups (the builder dispatches 1 there).
+            s.set_thread_limit(Some(x));
+            s.dispatch(list, x.div_ceil(tx.max(1)), y.div_ceil(ty.max(1)), z.div_ceil(tz.max(1)));
+            s.set_thread_limit(None);
+        });
     }
     /// `DispatchMesh(x, y, z)` (the PC method of List6); the title's mesh
     /// programs take `x` groups only.

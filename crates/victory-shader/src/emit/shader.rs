@@ -79,6 +79,17 @@ pub const USER_VIEW_ADDRESS: u32 = 0x101;
 /// view. Asked for every root UAV, and for the root SRVs of programs with
 /// a spilled user-data table.
 pub const USER_VIEW_BIAS: u32 = 0x103;
+/// `RootType::Other` code of a user-data dword the host computes: the number of threads in
+/// x of a dispatch given in threads (`DispatchX` with `USE_THREAD_DIMENSIONS`; all ones
+/// otherwise). A compute program translated with [`thread_dims`] lets the lanes at or past
+/// it leave at once, as the console runs only that many threads (its last group partial).
+pub const USER_THREAD_LIMIT: u32 = 0x104;
+
+/// `VICTORY_THREAD_DIMS=1`: compute programs end at once for lanes past [`USER_THREAD_LIMIT`].
+pub fn thread_dims() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_THREAD_DIMS").is_some_and(|v| v == "1"))
+}
 
 /// `ShaderFlags` bits (metadata) and their `SFI0` feature bits.
 pub(crate) mod flags {
