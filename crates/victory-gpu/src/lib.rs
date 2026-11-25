@@ -75,6 +75,8 @@ mod tiles;
 pub mod signature;
 #[cfg(windows)]
 mod texture;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod readcensus;
 #[cfg(windows)]
 mod watch;
 

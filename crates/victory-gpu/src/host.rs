@@ -7499,6 +7499,8 @@ pub(crate) fn read_into(src: *const u8, dst: &mut [u8]) -> bool {
 fn read(src: *const u8, dst: *mut u8, len: usize) -> bool {
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    #[cfg(feature = "diagnostics")]
+    crate::readcensus::disarm(src as usize, len, false);
     let mut done = 0;
     // SAFETY: the destination is mapped writable memory of `len` bytes; the
     // kernel checks the source.
@@ -7535,6 +7537,8 @@ fn direct_writes() -> bool {
 pub(crate) fn write_mapped(dst: *mut u8, src: *const u8, len: usize) {
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    #[cfg(feature = "diagnostics")]
+    crate::readcensus::disarm(dst as usize, len, true);
     let direct = direct_writes();
     let write = |at: usize, n: usize| {
         let from = src.wrapping_add(at - dst as usize);
@@ -7551,16 +7555,17 @@ pub(crate) fn write_mapped(dst: *mut u8, src: *const u8, len: usize) {
         // destination.
         unsafe { WriteProcessMemory(GetCurrentProcess(), at as _, from.cast(), n, &mut done) != 0 }
     };
-    if len == 0 || write(dst as usize, len) {
-        return;
+    if len != 0 && !write(dst as usize, len) {
+        for_pieces(dst as usize, len, 64 << 10, |at, n| {
+            if !write(at, n) {
+                for_pieces(at, n, 4 << 10, |at, n| {
+                    write(at, n);
+                });
+            }
+        });
     }
-    for_pieces(dst as usize, len, 64 << 10, |at, n| {
-        if !write(at, n) {
-            for_pieces(at, n, 4 << 10, |at, n| {
-                write(at, n);
-            });
-        }
-    });
+    #[cfg(feature = "diagnostics")]
+    crate::readcensus::arm(dst as usize, len);
 }
 
 /// Calls `f` with the pieces of `[start, start + len)` cut at multiples of
