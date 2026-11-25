@@ -487,6 +487,8 @@ fn through_copy() -> bool {
 /// through the kernel into this thread's read buffer; pages that are not
 /// there read as zeros. The bytes are those a read in place would see.
 fn with_title<R>(memory: *const u8, size: usize, f: impl FnOnce(&[u8]) -> R) -> R {
+    #[cfg(feature = "diagnostics")]
+    let _census = crate::readcensus::tag(crate::readcensus::TEXTURE, 0);
     with_read(size, |read| {
         crate::host::copy_mapped(read.as_mut_ptr(), memory, size, false);
         f(read)
@@ -1028,6 +1030,8 @@ impl Staging {
     }
 
     fn refresh_timed(&self) -> usize {
+        #[cfg(feature = "diagnostics")]
+        let _census = crate::readcensus::tag(crate::readcensus::TEXTURE, 0);
         let size = self.layout.size as usize;
         let start = self.memory as usize;
         let mut last = waited(0, || self.last.lock().unwrap_or_else(|e| e.into_inner()));
@@ -1159,6 +1163,8 @@ impl Staging {
     /// to it is forgotten, so that it is not passed over as unwritten).
     /// Returns the bytes read.
     fn refresh_unlocked(&self, last: &mut Last, size: usize) -> usize {
+        #[cfg(feature = "diagnostics")]
+        let _census = crate::readcensus::tag(crate::readcensus::TEXTURE, 0);
         use std::sync::atomic::Ordering::Relaxed;
         let read = with_read(size, |read| {
             if !crate::host::read_into(self.memory, read) {

@@ -55,12 +55,61 @@ fn ever() -> &'static [AtomicU64] {
 /// Pages armed, touched by a title read, by a title write, by the layer
 /// (a fault in `victory.exe` or a kernel access of the layer), and
 /// rewritten by a copy-back untouched.
-static COUNT: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+/// Then the layer's touches split by who read (v2): the copy that copied
+/// the page back (its refresh or its next merge), another copy, a texture,
+/// and a reader no tag names.
+static COUNT: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
 const ARMED: usize = 0;
 const TITLE_READ: usize = 1;
 const TITLE_WRITE: usize = 2;
 const HOST: usize = 3;
 const AGAIN: usize = 4;
+const SAME: usize = 5;
+const OTHER: usize = 6;
+const TEX: usize = 7;
+const UNTAGGED: usize = 8;
+
+/// Who on this thread reads or writes title memory now ([`tag`]).
+pub(crate) const COPY: u8 = 1;
+pub(crate) const MERGE: u8 = 2;
+pub(crate) const TEXTURE: u8 = 3;
+thread_local! {
+    static READER: std::cell::Cell<(u8, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Names this thread's reader until the result is dropped: a copy's
+/// refresh (`COPY`, its id), a copy-back merge (`MERGE`, its id; pages it
+/// writes are that copy's), a texture refresh (`TEXTURE`).
+pub(crate) fn tag(kind: u8, id: u64) -> Tag {
+    Tag(READER.with(|r| r.replace((kind, id))))
+}
+
+pub(crate) struct Tag((u8, u64));
+impl Drop for Tag {
+    fn drop(&mut self) {
+        READER.with(|r| r.set(self.0));
+    }
+}
+
+/// The copy whose copy-back guarded each page.
+fn owners() -> &'static std::sync::Mutex<std::collections::HashMap<usize, u64>> {
+    static OWNERS: OnceLock<std::sync::Mutex<std::collections::HashMap<usize, u64>>> = OnceLock::new();
+    OWNERS.get_or_init(Default::default)
+}
+
+/// A touch of the layer's at `page`, counted by its reader.
+fn layer_touch(page: usize) {
+    COUNT[HOST].fetch_add(1, Relaxed);
+    let (kind, id) = READER.with(std::cell::Cell::get);
+    let owner = owners().lock().unwrap_or_else(|e| e.into_inner()).get(&page).copied();
+    let which = match kind {
+        COPY | MERGE if owner == Some(id) => SAME,
+        COPY | MERGE => OTHER,
+        TEXTURE => TEX,
+        _ => UNTAGGED,
+    };
+    COUNT[which].fetch_add(1, Relaxed);
+}
 /// Guard hits on census pages caught between a bit and its guard.
 static RACES: AtomicU64 = AtomicU64::new(0);
 /// The first title instructions that read a guarded page.
@@ -110,8 +159,10 @@ unsafe extern "system" fn on_guard(p: *mut windows_sys::Win32::System::Diagnosti
     // The guard is gone with the fault: the access goes on when retried.
     let rip = r.ExceptionAddress as usize;
     let (start, end) = exe();
-    if (start..end).contains(&rip) {
-        COUNT[HOST].fetch_add(1, Relaxed);
+    // The layer's: its own code, or a thread a tag names (in a system
+    // library the layer called).
+    if (start..end).contains(&rip) || READER.with(std::cell::Cell::get).0 != 0 {
+        layer_touch(page);
     } else if r.ExceptionInformation[0] == 1 {
         COUNT[TITLE_WRITE].fetch_add(1, Relaxed);
     } else {
@@ -133,7 +184,11 @@ pub(crate) fn disarm(at: usize, len: usize, again: bool) {
         if !take(page) {
             continue;
         }
-        COUNT[if again { AGAIN } else { HOST }].fetch_add(1, Relaxed);
+        if again {
+            COUNT[AGAIN].fetch_add(1, Relaxed);
+        } else {
+            layer_touch(page);
+        }
         set_guard(page * PAGE, false);
     }
 }
@@ -155,6 +210,8 @@ pub(crate) fn arm(at: usize, len: usize) {
         }
         if set_guard(page * PAGE, true) {
             COUNT[ARMED].fetch_add(1, Relaxed);
+            let (kind, id) = READER.with(std::cell::Cell::get);
+            owners().lock().unwrap_or_else(|e| e.into_inner()).insert(page, if kind == MERGE { id } else { 0 });
         } else {
             bits()[page / 64].fetch_and(!bit, Relaxed);
         }
@@ -195,11 +252,15 @@ fn report() {
     let mb = |pages: f64| pages * PAGE as f64 / 1e6;
     let rips: Vec<String> = FIRST_RIPS.iter().map(|r| r.load(Relaxed)).filter(|&r| r != 0).map(|r| format!("{r:#x}")).collect();
     tracing::info!(
-        "read census, per second: {:.1} MB of copied-back pages guarded; touched by the title: {:.2} MB read, {:.2} MB written; by the layer {:.1} MB; copied back again untouched {:.1} MB; races {} (first title readers: {})",
+        "read census, per second: {:.1} MB of copied-back pages guarded; touched by the title: {:.2} MB read, {:.2} MB written; by the layer {:.1} MB (its own copy {:.1}, another copy {:.1}, textures {:.1}, untagged {:.1}); copied back again untouched {:.1} MB; races {} (first title readers: {})",
         mb(c[ARMED]),
         mb(c[TITLE_READ]),
         mb(c[TITLE_WRITE]),
         mb(c[HOST]),
+        mb(c[SAME]),
+        mb(c[OTHER]),
+        mb(c[TEX]),
+        mb(c[UNTAGGED]),
         mb(c[AGAIN]),
         RACES.load(Relaxed),
         rips.join(" ")

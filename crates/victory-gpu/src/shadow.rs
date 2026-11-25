@@ -2708,6 +2708,8 @@ impl Shadow {
     /// [`Shadow::copy_back`]; `found`, if given, is the pieces of the range
     /// that differ from the snapshot, found beforehand ([`find_all`]).
     pub(crate) fn copy_back_with(&self, address: usize, len: usize, found: Option<Vec<(usize, usize)>>) -> usize {
+        #[cfg(feature = "diagnostics")]
+        let _census = crate::readcensus::tag(crate::readcensus::MERGE, self.id);
         if self.place.is_some() {
             return 0;
         }
@@ -2813,6 +2815,8 @@ impl Shadow {
     /// never see each other half done. `now` and `title` are scratch
     /// memory. Returns the bytes written to title memory.
     pub(crate) fn relay_merge(&self, at: usize, n: usize, now: &mut Vec<u8>, title: &mut Vec<u8>) -> usize {
+        #[cfg(feature = "diagnostics")]
+        let _census = crate::readcensus::tag(crate::readcensus::MERGE, self.id);
         let start = self.start as usize;
         if self.card.is_some() || n == 0 || at + n > self.len as usize {
             return 0;
@@ -3407,6 +3411,8 @@ impl Shadow {
 
     /// Copies title memory `[from, to)`, cut to the buffer, into the copy.
     fn copy(&self, from: usize, to: usize) -> usize {
+        #[cfg(feature = "diagnostics")]
+        let _census = crate::readcensus::tag(crate::readcensus::COPY, self.id);
         let (start, end) = (self.start as usize, (self.start + self.len) as usize);
         let (from, to) = (from.max(start), to.min(end));
         if self.card.is_some() && from < to && copy_changed() && self.copy_changed(from, to) {
@@ -3427,6 +3433,8 @@ impl Shadow {
     /// are stored there and noted for the card. False with nothing done if
     /// title memory could not be read whole (the caller copies as before).
     fn copy_changed(&self, from: usize, to: usize) -> bool {
+        #[cfg(feature = "diagnostics")]
+        let _census = crate::readcensus::tag(crate::readcensus::COPY, self.id);
         thread_local! {
             static NOW: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
         }
@@ -3583,6 +3591,8 @@ impl Shadow {
     /// sends it up before the next submission. `title` is scratch memory.
     /// Returns the bytes written to title memory.
     pub(crate) fn card_merge(&self, at: usize, gpu: &[u8], title: &mut Vec<u8>) -> usize {
+        #[cfg(feature = "diagnostics")]
+        let _census = crate::readcensus::tag(crate::readcensus::MERGE, self.id);
         let start = self.start as usize;
         if self.card.is_none() || at + gpu.len() > self.len as usize {
             return 0;
@@ -3649,6 +3659,8 @@ impl Shadow {
     /// `title` is scratch memory. Returns the bytes written to title
     /// memory.
     pub(crate) fn card_merge_relay(&self, at: usize, gpu: &[u8], fetched_after: u64, title: &mut Vec<u8>) -> usize {
+        #[cfg(feature = "diagnostics")]
+        let _census = crate::readcensus::tag(crate::readcensus::MERGE, self.id);
         let start = self.start as usize;
         let Some(card) = &self.card else {
             return 0;
